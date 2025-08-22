@@ -72,6 +72,14 @@ def is_likely_actor_name(text: str) -> bool:
     if text_lower in COMMON_ACTOR_NAMES:
         return True
     
+    # Don't treat category names as actor names
+    if text_lower.startswith(('best ', 'outstanding ')):
+        return False
+    
+    # Don't treat single category words as actor names
+    if text_lower in ['actor', 'actress', 'director', 'cinematography', 'direction', 'writing', 'effects', 'engineering', 'art direction']:
+        return False
+    
     # Check for common actor name patterns
     words = text.split()
     if len(words) == 2:
@@ -89,6 +97,14 @@ def is_likely_actor_name(text: str) -> bool:
 def is_likely_film_title(text: str) -> bool:
     """Check if text is likely a film title."""
     text_lower = lower_norm(text)
+    
+    # Don't treat category names as film titles
+    if text_lower.startswith(('best ', 'outstanding ')):
+        return False
+    
+    # Don't treat category words as film titles
+    if text_lower in ['actor', 'actress', 'director', 'cinematography', 'direction', 'writing', 'effects', 'engineering', 'art direction']:
+        return False
     
     # Check against known film titles
     if text_lower in COMMON_FILM_TITLES:
@@ -114,25 +130,64 @@ def enhanced_looks_like_category_heading(s: str, year: int) -> bool:
     Enhanced category heading detection with year-specific logic.
     """
     ls = lower_norm(s)
+    s_clean = s.strip()
     
     # Basic length checks
-    if len(s) < 4 or len(s) > 70:
+    if len(s_clean) < 4 or len(s_clean) > 70:
         return False
     
     # Exclude common fragments
     exclude_fragments = {
         "view by category", "view by film", "select a category",
-        "highlights", "memorable moments", "share"
+        "highlights", "memorable moments", "share", "winner", "nominees", "nominee"
     }
     if any(x in ls for x in exclude_fragments):
         return False
     
-    # Early years specific logic (1929-1934)
-    if is_early_years_format(year):
-        return enhanced_early_years_category_detection(s, year)
+    # Check if it's likely an actor name or film title first
+    if is_likely_actor_name(s_clean) or is_likely_film_title(s_clean):
+        return False
     
-    # Modern years logic (1935+)
-    return enhanced_modern_years_category_detection(s, year)
+    # For early years (1929-1934), get the valid categories for this year
+    from oscar_categories_historical import get_categories_for_year
+    valid_categories = get_categories_for_year(year)
+    
+    # Check exact match with valid categories (full names)
+    if s_clean in valid_categories:
+        return True
+    
+    # Check simplified versions (without "Best" prefix)
+    for cat in valid_categories:
+        # Remove "Best " prefix for comparison
+        simplified = cat.replace("Best ", "").replace("Outstanding ", "")
+        if s_clean == simplified:
+            return True
+        
+        # Handle special cases like "Directing (Comedy Picture)"
+        if "directing" in simplified.lower() and "directing" in ls:
+            return True
+    
+    # Check traditional patterns for categories that start with Best/Outstanding
+    if re.match(r"^(Best|Outstanding)\s+[A-Z]", s_clean):
+        return True
+    
+    # Check for specific category keywords that indicate this is a category
+    category_indicators = {
+        "actor", "actress", "director", "directing", "writing", "cinematography",
+        "art direction", "production design", "sound", "music", "editing",
+        "effects", "engineering", "costume", "makeup", "documentary", "short",
+        "animated", "foreign", "international", "picture", "production"
+    }
+    
+    # Check if it contains category indicators and has proper structure
+    if any(indicator in ls for indicator in category_indicators):
+        # Must start with capital letter and have proper capitalization
+        if re.match(r"^[A-Z][a-zA-Z\s\(\),-]+$", s_clean):
+            # Additional check: shouldn't be too short for complex categories
+            if len(s_clean) >= 4:
+                return True
+    
+    return False
 
 def enhanced_early_years_category_detection(s: str, year: int) -> bool:
     """Enhanced category detection for early years (1929-1934)."""
@@ -209,8 +264,12 @@ def enhanced_extract_wn_lines(soup: BeautifulSoup, year: int) -> List[str]:
             # Early years might not have the "0-9 ALL" pattern
             if ("0-9" in s_clean and "ALL" in s_clean) or s_clean == "0-9":
                 break
-            # Additional early years section end markers
-            if any(marker in up for marker in ["BY FILM", "ALPHABETICAL", "INDEX"]):
+            # Be more specific about section end markers to avoid stopping on navigation elements
+            if up.startswith("VIEW BY FILM") or up.startswith("VIEW BY CATEGORY"):
+                # Skip navigation elements but don't break
+                continue
+            # More specific end markers
+            if up.startswith("ALPHABETICAL") or up.startswith("INDEX"):
                 break
         else:
             # Modern years use the standard pattern
@@ -350,8 +409,21 @@ def enhanced_parse_winners_nominees(lines: List[str], year: int, source_url: str
                         break
             
             # Import the to_canonical function from the main module
-            from oscar_categories_historical import normalize_category
-            category = normalize_category(current_category_raw or "Unknown Category", year)
+            from oscar_categories_historical import normalize_category, get_categories_for_year
+            
+            # Map simplified category names to full category names
+            category_raw = current_category_raw or "Unknown Category"
+            valid_categories = get_categories_for_year(year)
+            
+            # Try to find the full category name
+            full_category_name = category_raw
+            for valid_cat in valid_categories:
+                simplified = valid_cat.replace("Best ", "").replace("Outstanding ", "")
+                if category_raw == simplified:
+                    full_category_name = valid_cat
+                    break
+            
+            category = normalize_category(full_category_name, year)
             entry, next_i = enhanced_consume_entry(lines, i, year, max_lines=2)
             
             if entry:
@@ -376,8 +448,21 @@ def enhanced_parse_winners_nominees(lines: List[str], year: int, source_url: str
                         break
             
             # Import the to_canonical function from the main module
-            from oscar_categories_historical import normalize_category
-            category = normalize_category(current_category_raw or "Unknown Category", year)
+            from oscar_categories_historical import normalize_category, get_categories_for_year
+            
+            # Map simplified category names to full category names
+            category_raw = current_category_raw or "Unknown Category"
+            valid_categories = get_categories_for_year(year)
+            
+            # Try to find the full category name
+            full_category_name = category_raw
+            for valid_cat in valid_categories:
+                simplified = valid_cat.replace("Best ", "").replace("Outstanding ", "")
+                if category_raw == simplified:
+                    full_category_name = valid_cat
+                    break
+            
+            category = normalize_category(full_category_name, year)
             entry, next_i = enhanced_consume_entry(lines, i, year, max_lines=2)
             
             if entry:

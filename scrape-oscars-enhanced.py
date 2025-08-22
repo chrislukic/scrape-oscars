@@ -41,6 +41,7 @@ DEFAULT_START = 1929
 DEFAULT_END = 2025
 BASE = "https://www.oscars.org/oscars/ceremonies/{year}"
 OUTDIR = Path("data/oscars_nominees_by_category_FILMS_ENHANCED")
+CACHE_DIR = Path("data/html_cache")
 
 # Import historical category mapping
 from oscar_categories_historical import (
@@ -49,6 +50,83 @@ from oscar_categories_historical import (
     get_all_known_categories,
     get_modern_categories
 )
+
+def get_cache_path(year: int) -> Path:
+    """Get the cache file path for a given year."""
+    return CACHE_DIR / f"oscar_{year}.html"
+
+def load_cached_html(year: int) -> str:
+    """Load HTML from cache if available."""
+    cache_file = get_cache_path(year)
+    if cache_file.exists():
+        print(f"  Loading cached HTML for {year}")
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            print(f"  Warning: Failed to read cache file {cache_file}: {e}")
+            return None
+    return None
+
+def save_html_to_cache(year: int, html_content: str) -> bool:
+    """Save HTML content to cache."""
+    try:
+        # Ensure cache directory exists
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        
+        cache_file = get_cache_path(year)
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        print(f"  Cached HTML for {year} to {cache_file}")
+        return True
+    except Exception as e:
+        print(f"  Warning: Failed to cache HTML for {year}: {e}")
+        return False
+
+def fetch_html_cached(year: int, use_cache: bool = True, refresh_cache: bool = False) -> tuple[str, str]:
+    """
+    Fetch HTML with caching support.
+    
+    Args:
+        year: Year to fetch
+        use_cache: Whether to use cached version if available
+        refresh_cache: Whether to refresh the cache (re-download even if cached)
+    
+    Returns:
+        tuple of (html_content, source_url)
+    """
+    source_url = BASE.format(year=year)
+    
+    # Try to load from cache first (unless refresh is requested)
+    if use_cache and not refresh_cache:
+        cached_html = load_cached_html(year)
+        if cached_html:
+            return cached_html, source_url
+    
+    # Cache miss or refresh requested - fetch from web
+    print(f"  Fetching HTML from web for {year}")
+    
+    # Create session and fetch
+    session_id = create_browser_session()
+    if not session_id:
+        print(f"  Failed to create Bright Data session for {year}")
+        return None, source_url
+    
+    try:
+        soup, _ = fetch_html_with_brightdata(year, session_id)
+        if soup:
+            # Convert BeautifulSoup to string for caching
+            html_content = str(soup)
+            # Save to cache
+            save_html_to_cache(year, html_content)
+            return html_content, source_url
+        else:
+            print(f"  Failed to fetch HTML for {year}")
+            return None, source_url
+    finally:
+        # Always clean up the session
+        delete_browser_session(session_id)
 
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
@@ -170,25 +248,26 @@ def write_by_category(rows, outdir: Path):
             for row in items_sorted:
                 w.writerow(row)
 
-def run(start_year: int, end_year: int, delay: float):
+def run(start_year: int, end_year: int, delay: float, use_cache: bool = True, refresh_cache: bool = False):
     """Main scraping function using enhanced parsing logic."""
     print("Using Enhanced Oscar Scraping with Improved Early Years Parsing...")
     
-    # Create a browser session
-    print("Creating browser session...")
-    session_id = create_browser_session()
-    print(f"Session created: {session_id}")
+    print(f"Cache enabled: {use_cache}, Refresh cache: {refresh_cache}")
+    print(f"Cache directory: {CACHE_DIR}")
     
     try:
         all_rows = []
         for year in range(start_year, end_year + 1):
             try:
                 print(f"\nProcessing year {year}...")
-                soup, url = fetch_html_with_brightdata(year, session_id)
+                # Use cached fetch
+                html_content, url = fetch_html_cached(year, use_cache=use_cache, refresh_cache=refresh_cache)
                 
-                if soup is None:
-                    print(f"[warn] {year}: Could not fetch page", file=sys.stderr)
+                if html_content is None:
+                    print(f"[warn] {year}: Could not fetch or load HTML", file=sys.stderr)
                     continue
+                
+                soup = BeautifulSoup(html_content, "html.parser")
                 
                 # Use enhanced extraction with year-specific logic
                 lines = enhanced_extract_wn_lines(soup, year)
@@ -218,14 +297,25 @@ def run(start_year: int, end_year: int, delay: float):
             print(" -", (OUTDIR / ex))
             
     finally:
-        # Always clean up the session
-        delete_browser_session(session_id)
+        # Cleanup happens in fetch_html_cached for each request
+        pass
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Enhanced Oscar scraping with improved early years parsing using Bright Data Browser API WebDriver protocol.")
     ap.add_argument("--start", type=int, default=DEFAULT_START, help="Start ceremony year (e.g., 1929)")
     ap.add_argument("--end", type=int, default=DEFAULT_END, help="End ceremony year (e.g., 2025)")
     ap.add_argument("--delay", type=float, default=2.0, help="Seconds between requests (be polite)")
+    ap.add_argument("--no-cache", action="store_true", help="Disable HTML caching (always fetch from web)")
+    ap.add_argument("--refresh-cache", action="store_true", help="Refresh cached HTML (re-download even if cached)")
+    ap.add_argument("--cache-dir", type=str, default=str(CACHE_DIR), help="Directory for HTML cache files")
     args = ap.parse_args()
-    run(args.start, args.end, args.delay)
+    
+    # Update cache directory if specified
+    if args.cache_dir != str(CACHE_DIR):
+        CACHE_DIR = Path(args.cache_dir)
+    
+    run(args.start, args.end, args.delay, 
+        use_cache=not args.no_cache, 
+        refresh_cache=args.refresh_cache)
+
 
